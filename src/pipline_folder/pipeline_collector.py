@@ -1,7 +1,6 @@
 from db_folder.db_connection import ConnectionDB
 from api_folder.api_module import APIKeyManager
 from pipline_folder.auth_middleware import AuthMiddleware
-import json
 from decimal import Decimal
 from datetime import timedelta
 from typing import Dict, Any, Optional
@@ -38,6 +37,30 @@ class PipelineCollector:
             JOIN projects pr ON pr.id = p.project_id
             WHERE p.id = $1 AND pr.user_id = $2
         """, pipeline_id, user['id'])
+
+    async def find_pipelines_by_name(self, pipeline_name: str):
+        """Найти пайплайны пользователя по части названия (ILIKE)."""
+        user = await self._authenticate()
+        pattern = f"%{pipeline_name.strip()}%"
+        return await self.db_conn.fetch("""
+            SELECT p.*, pr.name as project_name
+            FROM pipelines p
+            JOIN projects pr ON pr.id = p.project_id
+            WHERE pr.user_id = $1 AND p.name ILIKE $2
+            ORDER BY p.id
+        """, user["id"], pattern)
+
+    async def get_pipeline_by_exact_name(self, pipeline_name: str):
+        """Получить первый пайплайн пользователя по точному имени."""
+        user = await self._authenticate()
+        return await self.db_conn.fetch_one("""
+            SELECT p.*, pr.name as project_name
+            FROM pipelines p
+            JOIN projects pr ON pr.id = p.project_id
+            WHERE pr.user_id = $1 AND p.name = $2
+            ORDER BY p.id
+            LIMIT 1
+        """, user["id"], pipeline_name.strip())
     
     async def get_structure_of_pipeline(self, pipeline_id: int):
         """Получить полную структуру пайплайна"""
