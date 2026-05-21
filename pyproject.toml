@@ -1,7 +1,7 @@
 [project]
 name = "my-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pipeline MCP server (official MCP Python SDK / FastMCP)"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

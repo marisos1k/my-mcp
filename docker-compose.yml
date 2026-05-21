@@ -10,13 +10,15 @@ services:
     ports:
       - "5432:5432"
     volumes:
+      # PG 18+: монтировать в /var/lib/postgresql (см. документацию образа postgres)
       - postgres_data:/var/lib/postgresql
-      - ./test_brainiac.sql:/docker-entrypoint-initdb.d/test_brainiac.sql:ro
+      - ./test_brainiac.sql:/docker-entrypoint-initdb.d/01-test_brainiac.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d test_brainiac"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 15s
 
   mcp-server:
     build:
@@ -27,6 +29,7 @@ services:
     env_file:
       - config.env
     environment:
+      # Переопределяют host из config.env — в сети compose БД = имя сервиса db
       host: db
       port: "5432"
       MCP_TRANSPORT: streamable-http
@@ -37,6 +40,18 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1', 8000), 2); s.close()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   postgres_data:

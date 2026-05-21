@@ -42,6 +42,23 @@ docker compose down
 
 Данные PostgreSQL сохраняются в volume `postgres_data`. Чтобы пересоздать БД с нуля: `docker compose down -v`, затем снова `up`.
 
+## Экспорт пайплайна в код (автоматизация для агента)
+
+Пользователю достаточно **подключить MCP** и написать, например: «Экспортируй пайплайн schedule_agent кодом, проект time_manager».
+
+Агент должен вызвать **`export_pipeline_as_code`** — в ответе:
+
+- **`pipeline_spec`** — данные пайплайна (как `export_for_llm`);
+- **`workflow`** — инструкции skill (скачивание skill вручную не обязательно).
+
+Дополнительно на сервере:
+
+- **instructions** сервера — подсказка агенту использовать `export_pipeline_as_code`;
+- **resource** `skill://pipeline-to-code` — текст skill;
+- **prompt** `export_pipeline_as_code` — готовый шаблон запроса в UI MCP.
+
+Тексты skills хранятся в `cursor_skills/` и отдаются через MCP (пересборка образа: `docker compose up --build`).
+
 ## Локальный запуск (без Docker для MCP)
 
 ### 1. База данных
@@ -141,7 +158,7 @@ flowchart LR
   Coll --> DB
 ```
 
-1. **`mcp_server.py`** — точка входа: `FastMCP`, загрузка `config.env`, регистрация tools. При первом запросе создаётся пул `ConnectionDB` и `AuthMiddleware`.
+1. **`mcp_server.py`** + **`mcp_app/`** — [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk): `FastMCP`, `lifespan` (пул БД на старте/остановке), tools с `Context[AppContext]`.
 2. **`db_folder/db_connection.py`** — пул **asyncpg**, методы `fetch` / `fetch_one` / `execute`.
 3. **`api_folder/api_module.py`** — генерация и проверка API-ключей (PBKDF2, префикс `tm_…`), привязка к `users`.
 4. **`pipline_folder/auth_middleware.py`** — аутентификация по ключу; при ошибке — `InvalidApiKeyError`.
@@ -174,6 +191,7 @@ flowchart LR
 | `get_pipelines` | Список пайплайнов (метаданные без id); опционально фильтр `project_name` |
 | `search_pipelines` | Поиск пайплайнов по подстроке имени (`ILIKE`) |
 | `get_pipeline_structure` | Граф: pipeline, nodes (`step_slot`, тип, tool), links, statistics |
+| `export_pipeline_as_code` | Спецификация + workflow для генерации кода (основной сценарий) |
 | `export_for_llm` | JSON для модели: `blocks`, `connections`, `execution_sequence`, `limits` |
 | `get_pipeline_flow` | Только `execution_sequence` для указанного пайплайна |
 
@@ -191,7 +209,8 @@ my-mcp/
 ├── test_brainiac.sql       # схема и тестовые данные
 ├── pyproject.toml
 ├── src/
-│   ├── mcp_server.py       # MCP-сервер (основная точка входа)
+│   ├── mcp_server.py       # точка входа
+│   ├── mcp_app/            # SDK: config, lifespan, tools, views
 │   ├── json_utils.py
 │   ├── test.py             # консоль для ключей и отладки
 │   ├── api_folder/
