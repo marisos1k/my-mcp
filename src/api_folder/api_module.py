@@ -92,6 +92,18 @@ class APIKeyManager:
             SET is_active = false 
             WHERE user_id = $1 AND key_name = $2 AND is_active = true
         """, user_id, key_name)
+
+    async def revoke_api_key_by_id(self, user_id: int, key_id: int):
+        """Отозвать API ключ по id."""
+        await self.db_conn.execute(
+            """
+            UPDATE api_keys
+            SET is_active = false
+            WHERE user_id = $1 AND id = $2 AND is_active = true
+            """,
+            user_id,
+            key_id,
+        )
     
     async def list_user_keys(self, user_id: int):
         """Список всех ключей пользователя"""

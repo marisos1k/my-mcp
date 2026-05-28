@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: "7474"
       POSTGRES_DB: test_brainiac
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       # PG 18+: монтировать в /var/lib/postgresql (см. документацию образа postgres)
       - postgres_data:/var/lib/postgresql

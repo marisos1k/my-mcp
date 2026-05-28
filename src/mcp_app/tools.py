@@ -53,9 +53,8 @@ def register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         description=(
-            "Структура пайплайна по точным project_name и pipeline_name. "
-            "Узлы с step_slot, связи from_step/to_step (не id БД). "
-            "Персональные данные пользователя в ответ не включаются."
+            "Структура пайплайна (export_version=2): blocks с node_config/ports, "
+            "connections с from_port/to_port, nested_pipeline refs."
         )
     )
     async def get_pipeline_structure(
@@ -93,7 +92,7 @@ def register_tools(mcp: FastMCP) -> None:
         )
         if not structure:
             raise ValueError("Pipeline not found or access denied")
-        spec = collector.export_structure_to_llm(structure)
+        spec = await collector.export_structure_to_llm(structure)
         pl = spec.get("pipeline_name") or pipeline_name
         return {
             "pipeline_spec": spec,
@@ -106,8 +105,8 @@ def register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         description=(
-            "Экспорт пайплайна для LLM: blocks со step_slot, connections по from_step/to_step, "
-            "execution_sequence в порядке обхода графа (как связи), без id сущностей БД."
+            "Экспорт пайплайна для LLM: blocks с node_config/ports, connections с портами, "
+            "execution_plan, nested_pipelines (export_version=2)."
         )
     )
     async def export_for_llm(
@@ -123,12 +122,11 @@ def register_tools(mcp: FastMCP) -> None:
         )
         if not structure:
             raise ValueError("Pipeline not found or access denied")
-        return collector.export_structure_to_llm(structure)
+        return await collector.export_structure_to_llm(structure)
 
     @mcp.tool(
         description=(
-            "Порядок выполнения узлов по рёбрам графа (согласован с export_for_llm). "
-            "Поля: step_slot, step (type_name), tool, description."
+            "Порядок выполнения узлов: step_slot, tool, node_config (согласован с export_for_llm)."
         )
     )
     async def get_pipeline_flow(

@@ -2,21 +2,52 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from datetime import datetime
 from typing import List, Optional
-import jwt
-from datetime import datetime, timedelta
 import sys
 import os
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from demo_auth import register_user, login_user, get_user_by_id, db
-from api_folder.api_module import APIKeyManager
-from pipline_folder.pipeline_collector import PipelineCollector
-from pipline_folder.auth_middleware import AuthMiddleware
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="MCP Platform Demo", port=8001)
+from demo_auth import register_user, login_user, get_user_by_id, db
+from db_settings import config_summary
+from api_folder.api_module import APIKeyManager
+from graph_routes import router as graph_router
+from graph_schema import ensure_graph_schema
+from jwt_auth import create_token, verify_token
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        await db.connect_db()
+        await ensure_graph_schema()
+    except Exception as e:
+        print("=" * 50)
+        print("ОШИБКА: не удалось подключиться к PostgreSQL")
+        print(f"  {config_summary()}")
+        print(f"  {type(e).__name__}: {e}")
+        print()
+        print("Проверьте:")
+        print("  1. docker compose up db -d   (каталог my-mcp)")
+        print("  2. src/fastapi/config.env — host=127.0.0.1, port как в compose")
+        print("  3. Порт 5432 занят? Остановите локальный PostgreSQL или")
+        print("     в compose: \"5433:5432\" и port=5433 в config.env")
+        print("=" * 50)
+        raise SystemExit(1) from e
+    print("=" * 50)
+    print("Demo API started!")
+    print("URL: http://localhost:8001")
+    print("Docs: http://localhost:8001/docs")
+    print("=" * 50)
+    yield
+    await db.close_conn()
+
+
+app = FastAPI(title="MCP Platform Demo", lifespan=lifespan)
 
 
 app.add_middleware(
@@ -28,11 +59,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# JWT настройки
-SECRET_KEY = "demo_secret_key_2024"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+app.include_router(graph_router, prefix="/api")
 
 # Модели
 class RegisterRequest(BaseModel):
@@ -45,6 +72,9 @@ class LoginRequest(BaseModel):
 
 class CreateApiKeyRequest(BaseModel):
     key_name: str
+
+class RevokeApiKeyRequest(BaseModel):
+    key_id: int
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -59,18 +89,6 @@ class ApiKeyResponse(BaseModel):
     is_active: bool
     created_at: datetime
     last_used_at: Optional[datetime]
-
-def create_token(user_id: int, email: str) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {"sub": str(user_id), "email": email, "exp": expire}
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-def verify_token(token: str):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except:
-        return None
 
 # ============ РЕГИСТРАЦИЯ ============
 @app.get("/")
@@ -119,7 +137,6 @@ async def create_api_key(request: CreateApiKeyRequest, token: str):
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    await db.connect_db()
     key_manager = APIKeyManager(db)
     raw_key = await key_manager.create_api_key(int(payload['sub']), request.key_name)
     return {"api_key": raw_key}
@@ -130,7 +147,6 @@ async def list_api_keys(token: str):
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    await db.connect_db()
     key_manager = APIKeyManager(db)
     keys = await key_manager.list_user_keys(int(payload['sub']))
     
@@ -145,6 +161,17 @@ async def list_api_keys(token: str):
             "last_used_at": key['last_used_at']
         })
     return result
+
+
+@app.post("/api/keys/revoke")
+async def revoke_api_key(request: RevokeApiKeyRequest, token: str):
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    key_manager = APIKeyManager(db)
+    await key_manager.revoke_api_key_by_id(int(payload["sub"]), int(request.key_id))
+    return {"ok": True}
 
 # ============ ПРОЕКТЫ ============
 
@@ -256,20 +283,6 @@ async def get_pipeline(pipeline_id: int, token: str):
         raise HTTPException(status_code=404, detail="Pipeline not found")
     
     return dict(pipeline)
-
-@app.on_event("startup")
-async def startup():
-    await db.connect_db()
-    print("=" * 50)
-    print("Demo API started!")
-    print(f"URL: http://localhost:8001")
-    print(f"Docs: http://localhost:8001/docs")
-    print("=" * 50)
-
-@app.on_event("shutdown")
-async def shutdown():
-    await db.close_conn()
-
 
 
 if __name__ == "__main__":

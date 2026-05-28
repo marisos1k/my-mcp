@@ -4,14 +4,17 @@ from typing import Any, Dict, Optional
 
 from api_folder.api_module import APIKeyManager
 from db_folder.db_connection import ConnectionDB
-from json_utils import json_safe
 from pipline_folder.auth_middleware import AuthMiddleware
-
-
-def step_slots_by_node_id(nodes: list[dict[str, Any]]) -> dict[int, int]:
-    """Стабильные порядковые слоты 1..N по возрастанию внутреннего id узла (не отдаётся наружу как id сущности)."""
-    sorted_nodes = sorted(nodes, key=lambda n: n["id"])
-    return {n["id"]: i + 1 for i, n in enumerate(sorted_nodes)}
+from pipline_folder.graph_export import (
+    normalize_node,
+    pipeline_spec_from_graph,
+)
+from pipline_folder.graph_executor import (
+    build_execution_plan,
+    connections_with_ports,
+    execution_sequence_walk,
+)
+from pipline_folder.graph_slots import step_slots_by_node_id
 
 
 def connections_with_step_slots(
@@ -24,39 +27,8 @@ def connections_with_step_slots(
     ]
 
 
-def execution_sequence_walk(
-    nodes: list[dict[str, Any]], links: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Порядок обхода по рёбрам от стартового узла (нет входящих рёбер в этот пайплайн)."""
-    if not nodes:
-        return []
-    slot = step_slots_by_node_id(nodes)
-    nodes_dict = {node["id"]: node for node in nodes}
-    to_nodes = {link["to_node"] for link in links}
-    start_node = next((node for node in nodes if node["id"] not in to_nodes), None)
-    if not start_node:
-        start_node = sorted(nodes, key=lambda n: n["id"])[0]
-
-    out: list[dict[str, Any]] = []
-    current_id: int | None = start_node["id"]
-    while current_id is not None:
-        node = nodes_dict[current_id]
-        out.append(
-            {
-                "step_slot": slot[current_id],
-                "step": node["type_name"],
-                "tool": node["tool_name"],
-                "description": node.get("type_description"),
-            }
-        )
-        next_link = next(
-            (link for link in links if link["from_node"] == current_id), None
-        )
-        current_id = next_link["to_node"] if next_link else None
-    return out
-
-
 def blocks_ordered_with_slots(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Устаревший формат blocks (без node_config). Оставлен для совместимости."""
     slot = step_slots_by_node_id(nodes)
     ordered = sorted(nodes, key=lambda n: n["id"])
     return [
@@ -178,10 +150,13 @@ class PipelineCollector:
             """
             SELECT
                 n.*,
+                np.name AS nested_pipeline_name,
                 nt.name as type_name,
                 nt.description as type_description,
-                t.name as tool_name
+                t.name as tool_name,
+                t.config as tool_config
             FROM nodes n
+            LEFT JOIN pipelines np ON np.id = n.nested_pipeline_id
             JOIN node_types nt ON nt.id = n.type_id
             JOIN tools t ON t.id = nt.tool_id
             WHERE n.pipeline_id = $1
@@ -211,6 +186,43 @@ class PipelineCollector:
                 "total_links": len(link_list),
             },
         }
+
+    async def _gather_nested_pipeline_specs(
+        self,
+        user_id: int,
+        nodes: list[dict[str, Any]],
+        *,
+        seen_ids: set[int] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        seen = seen_ids or set()
+        specs: dict[str, dict[str, Any]] = {}
+
+        for n in nodes:
+            nested_id = n.get("nested_pipeline_id")
+            if not nested_id:
+                continue
+            nid = int(nested_id)
+            if nid in seen:
+                continue
+            seen.add(nid)
+
+            nested = await self._fetch_graph(user_id, nid)
+            if not nested:
+                continue
+
+            name = nested["pipeline"]["name"]
+            nn = [normalize_node(dict(x)) for x in nested["nodes"]]
+            nl = [dict(x) for x in nested["links"]]
+            inner = await self._gather_nested_pipeline_specs(user_id, nn, seen_ids=seen)
+            spec = pipeline_spec_from_graph(
+                nested["pipeline"], nn, nl, nested_specs=inner
+            )
+            spec["_raw_nodes"] = nn
+            spec["_raw_links"] = nl
+            specs[name] = spec
+            specs.update(inner)
+
+        return specs
 
     async def _structure_for_user_pipeline(
         self, user: dict[str, Any], pipeline_id: int
@@ -244,28 +256,27 @@ class PipelineCollector:
             )
         return await self._structure_for_user_pipeline(user, ids[0])
 
+    async def export_structure_to_llm(self, structure: dict[str, Any]) -> dict[str, Any]:
+        """Полный экспорт: node_config, порты, nested pipelines, execution_plan."""
+        user = structure.get("user") or {}
+        user_id = int(user["id"])
+        nodes = [normalize_node(dict(n)) for n in structure["nodes"]]
+        links = [dict(l) for l in structure["links"]]
+        nested_specs = await self._gather_nested_pipeline_specs(user_id, nodes)
+        return pipeline_spec_from_graph(
+            structure["pipeline"],
+            nodes,
+            links,
+            nested_specs=nested_specs,
+        )
+
     def pipeline_to_llm_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Синхронный экспорт без nested (legacy). Используйте export_structure_to_llm."""
         if not data:
             return {}
-
-        nodes = data["nodes"]
-        links = data["links"]
-        p = data["pipeline"]
-
-        return {
-            "project_name": p.get("project_name"),
-            "pipeline_name": p["name"],
-            "description": p.get("report"),
-            "limits": {
-                "max_time": json_safe(p.get("max_time")),
-                "max_cost": json_safe(p.get("max_cost")),
-                "max_fail_percent": json_safe(p.get("max_fail_percent")),
-                "score": json_safe(p.get("score")),
-            },
-            "blocks": blocks_ordered_with_slots(nodes),
-            "connections": connections_with_step_slots(nodes, links),
-            "execution_sequence": execution_sequence_walk(nodes, links),
-        }
+        nodes = [normalize_node(dict(n)) for n in data["nodes"]]
+        links = [dict(l) for l in data["links"]]
+        return pipeline_spec_from_graph(data["pipeline"], nodes, links)
 
     async def export_pipeline_to_llm(
         self, pipeline_id: int
@@ -273,8 +284,4 @@ class PipelineCollector:
         structure = await self.get_structure_of_pipeline(pipeline_id)
         if not structure:
             return None
-        return self.pipeline_to_llm_json(structure)
-
-    def export_structure_to_llm(self, structure: dict[str, Any]) -> dict[str, Any]:
-        """Экспорт без повторного запроса к БД (ожидает полный structure с nodes/links/pipeline)."""
-        return self.pipeline_to_llm_json(structure)
+        return await self.export_structure_to_llm(structure)

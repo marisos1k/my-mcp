@@ -1,7 +1,13 @@
 FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1\
+    user=postgres\
+    password=7474\
+    database=test_brainiac\
+    host=localhost\
+    port=5432
+
 
 WORKDIR /app
 

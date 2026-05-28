@@ -42,6 +42,23 @@ docker compose down
 
 Данные PostgreSQL сохраняются в volume `postgres_data`. Чтобы пересоздать БД с нуля: `docker compose down -v`, затем снова `up`.
 
+## Pipeline Studio (React Flow)
+
+Визуальный редактор workflow в каталоге **`ReactFlow/`** (n8n-подобный UI).
+
+```bash
+docker compose up db -d
+cd src/fastapi && python demo_api.py
+
+cd ReactFlow && npm install && npm run dev
+```
+
+UI: http://localhost:5173 — проекты, пайплайны, редактор графа. Сохранённый граф в PostgreSQL виден в MCP.
+
+Подробнее: [ReactFlow/README.md](ReactFlow/README.md).
+
+**Порты и ветвление:** блок `branch` (да / нет / ошибка), несколько входов/выходов из `tools.config`, сохранение `source_handle` на связях, `execution_plan` в MCP. Миграция: `migrations/002_link_handles_and_branch_type.sql`.
+
 ## Экспорт пайплайна в код (автоматизация для агента)
 
 Пользователю достаточно **подключить MCP** и написать, например: «Экспортируй пайплайн schedule_agent кодом, проект time_manager».
@@ -177,9 +194,23 @@ flowchart LR
 
 Запросы всегда фильтруются по `user_id`, полученному после проверки API-ключа.
 
+### Шаблоны агентных пайплайнов
+
+В ReactFlow Studio на странице проекта можно создать workflow **из шаблона** (кнопка «Создать по шаблону»):
+
+| ID шаблона | Описание |
+|------------|----------|
+| `simple_llm` | Один блок LLM |
+| `llm_notify` | LLM → уведомление |
+| `schedule_agent` | Парсинг → календарь → слот → уведомление |
+| `llm_router` | LLM → branch → два сценария |
+| `error_handler_agent` | LLM → branch (да / нет / ошибка) |
+
+API: `GET /api/catalog/agent-templates`, `POST /api/projects/{id}/pipelines/from-template` с телом `{ "name", "template_id" }`.
+
 ### Слоты шагов (`step_slot`)
 
-Внутренние id узлов в ответах MCP **не отдаются**. Вместо этого узлам присваиваются стабильные номера **1…N** по возрастанию id в БД. Связи описываются как `from_step` / `to_step`. Порядок выполнения в `get_pipeline_flow` и `export_for_llm` строится обходом графа от стартового узла (без входящих рёбер) по цепочке links.
+Внутренние id узлов в ответах MCP **не отдаются**. Вместо этого узлам присваиваются стабильные номера **1…N** по возрастанию id в БД. Связи описываются как `from_step` / `to_step` с портами `from_port` / `to_port`. Экспорт **`export_version: 2`** включает полные настройки блоков (`node_config`, `ports`, `tool_config`), вложенные пайплайны (`nested_pipelines`) и план выполнения с ветвлениями (`execution_plan`).
 
 Если по паре `(project_name, pipeline_name)` в БД несколько записей, возвращается **ошибка** — нужна уникальность имён в рамках проекта.
 
@@ -190,10 +221,10 @@ flowchart LR
 | `get_projects` | Список имён проектов текущего пользователя |
 | `get_pipelines` | Список пайплайнов (метаданные без id); опционально фильтр `project_name` |
 | `search_pipelines` | Поиск пайплайнов по подстроке имени (`ILIKE`) |
-| `get_pipeline_structure` | Граф: pipeline, nodes (`step_slot`, тип, tool), links, statistics |
-| `export_pipeline_as_code` | Спецификация + workflow для генерации кода (основной сценарий) |
-| `export_for_llm` | JSON для модели: `blocks`, `connections`, `execution_sequence`, `limits` |
-| `get_pipeline_flow` | Только `execution_sequence` для указанного пайплайна |
+| `get_pipeline_structure` | Граф v2: blocks с `node_config`/ports, connections с портами, statistics |
+| `export_pipeline_as_code` | Спецификация v2 + workflow для генерации кода (основной сценарий) |
+| `export_for_llm` | JSON v2: `blocks`, `connections`, `execution_plan`, `nested_pipelines`, `limits` |
+| `get_pipeline_flow` | `execution_sequence` с `node_config` для указанного пайплайна |
 
 Во всех tools: **`api_key`** (строка). Для структуры и экспорта также **`project_name`**, **`pipeline_name`** (точное совпадение с БД).
 

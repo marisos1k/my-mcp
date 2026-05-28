@@ -14,32 +14,47 @@ DB_CONFIG = {
 }
 
 class ConnectionDB:
-    """Подключение к бд 
-        и базовые операции"""
-    def __init__(self, config: dict):
+    """Подключение к бд и базовые операции (один пул на процесс)."""
+
+    def __init__(self, config: dict, *, min_size: int = 1, max_size: int = 5):
         self.config = config
-        self.pool = None
-    
-    async def connect_db(self):
-        self.pool = await asyncpg.create_pool(**self.config)
-        print('БД подключена')
+        self._min_size = min_size
+        self._max_size = max_size
+        self.pool: asyncpg.Pool | None = None
+
+    async def connect_db(self) -> asyncpg.Pool:
+        """Создаёт пул один раз; повторные вызовы безопасны."""
+        if self.pool is not None:
+            return self.pool
+        self.pool = await asyncpg.create_pool(
+            min_size=self._min_size,
+            max_size=self._max_size,
+            **self.config,
+        )
+        print("БД подключена")
         return self.pool
-    
-    async def close_conn(self):
-        if self.pool:
+
+    async def close_conn(self) -> None:
+        if self.pool is not None:
             await self.pool.close()
-            print('Подключение прервано')
+            self.pool = None
+            print("Подключение прервано")
+
+    def _require_pool(self) -> asyncpg.Pool:
+        if self.pool is None:
+            raise RuntimeError("Database pool is not connected")
+        return self.pool
 
     async def fetch_one(self, query: str, *args):
-        async with self.pool.acquire() as conn:
+        async with self._require_pool().acquire() as conn:
             return await conn.fetchrow(query, *args)
     
     async def fetch(self, query: str, *args):
-        async with self.pool.acquire() as conn:
+        async with self._require_pool().acquire() as conn:
             return await conn.fetch(query, *args)
         
     async def execute(self, query: str, *args):
-        async with self.pool.acquire() as conn:
+        async with self._require_pool().acquire() as conn:
             return await conn.execute(query, *args)
 
 
