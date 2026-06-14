@@ -42,22 +42,15 @@ docker compose down
 
 Данные PostgreSQL сохраняются в volume `postgres_data`. Чтобы пересоздать БД с нуля: `docker compose down -v`, затем снова `up`.
 
-## Pipeline Studio (React Flow)
+## Поддержка ветвлений и портов
 
-Визуальный редактор workflow в каталоге **`ReactFlow/`** (n8n-подобный UI).
+Граф пайплайна поддерживает узел-разветвитель **`branch`** (исходы: да / нет / ошибка) и несколько входов/выходов у блока, описанных в `tools.config`. Связи (`links`) хранят `source_handle` / `target_handle` — порт, из которого выходит и в который входит ребро. MCP-инструменты (`get_pipeline_structure`, `export_pipeline_as_code`, `export_for_llm`) отдают эти данные как `ports`, `connections[].from_port`/`to_port` и план выполнения с ветвлениями `execution_plan`.
+
+Для БД, созданных до появления этих полей, примените миграцию:
 
 ```bash
-docker compose up db -d
-cd src/fastapi && python demo_api.py
-
-cd ReactFlow && npm install && npm run dev
+psql -U postgres -d test_brainiac -f migrations/002_link_handles_and_branch_type.sql
 ```
-
-UI: http://localhost:5173 — проекты, пайплайны, редактор графа. Сохранённый граф в PostgreSQL виден в MCP.
-
-Подробнее: [ReactFlow/README.md](ReactFlow/README.md).
-
-**Порты и ветвление:** блок `branch` (да / нет / ошибка), несколько входов/выходов из `tools.config`, сохранение `source_handle` на связях, `execution_plan` в MCP. Миграция: `migrations/002_link_handles_and_branch_type.sql`.
 
 ## Экспорт пайплайна в код (автоматизация для агента)
 
@@ -194,20 +187,6 @@ flowchart LR
 
 Запросы всегда фильтруются по `user_id`, полученному после проверки API-ключа.
 
-### Шаблоны агентных пайплайнов
-
-В ReactFlow Studio на странице проекта можно создать workflow **из шаблона** (кнопка «Создать по шаблону»):
-
-| ID шаблона | Описание |
-|------------|----------|
-| `simple_llm` | Один блок LLM |
-| `llm_notify` | LLM → уведомление |
-| `schedule_agent` | Парсинг → календарь → слот → уведомление |
-| `llm_router` | LLM → branch → два сценария |
-| `error_handler_agent` | LLM → branch (да / нет / ошибка) |
-
-API: `GET /api/catalog/agent-templates`, `POST /api/projects/{id}/pipelines/from-template` с телом `{ "name", "template_id" }`.
-
 ### Слоты шагов (`step_slot`)
 
 Внутренние id узлов в ответах MCP **не отдаются**. Вместо этого узлам присваиваются стабильные номера **1…N** по возрастанию id в БД. Связи описываются как `from_step` / `to_step` с портами `from_port` / `to_port`. Экспорт **`export_version: 2`** включает полные настройки блоков (`node_config`, `ports`, `tool_config`), вложенные пайплайны (`nested_pipelines`) и план выполнения с ветвлениями (`execution_plan`).
@@ -238,20 +217,29 @@ my-mcp/
 ├── docker-compose.yml      # PostgreSQL + MCP
 ├── Dockerfile
 ├── test_brainiac.sql       # схема и тестовые данные
+├── migrations/
+│   └── 002_link_handles_and_branch_type.sql
+├── cursor_skills/           # skills, отдаются через MCP (resource skill://...)
 ├── pyproject.toml
-├── src/
-│   ├── mcp_server.py       # точка входа
-│   ├── mcp_app/            # SDK: config, lifespan, tools, views
-│   ├── json_utils.py
-│   ├── test.py             # консоль для ключей и отладки
-│   ├── api_folder/
-│   │   └── api_module.py
-│   ├── db_folder/
-│   │   └── db_connection.py
-│   └── pipline_folder/
-│       ├── auth_middleware.py
-│       └── pipeline_collector.py
-└── main.py                 # заглушка, не используется для MCP
+└── src/
+    ├── mcp_server.py       # точка входа
+    ├── mcp_app/            # SDK: config, lifespan, tools, views
+    ├── json_utils.py
+    ├── test.py             # консоль для ключей и отладки
+    ├── test_db.py          # проверка подключения к БД
+    ├── config.env          # конфиг для test.py / test_db.py (запуск из src/)
+    ├── api_folder/
+    │   └── api_module.py
+    ├── db_folder/
+    │   └── db_connection.py
+    └── pipline_folder/
+        ├── auth_middleware.py
+        ├── pipeline_collector.py
+        ├── graph_export.py
+        ├── graph_executor.py
+        ├── graph_slots.py
+        ├── pipeline_interface.py
+        └── port_schema.py
 ```
 
 ## Консоль для отладки (`test.py`)
