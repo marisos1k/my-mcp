@@ -1,0 +1,7 @@
+# Все текстовые файлы — LF (единый стиль для Linux-контейнеров)
+* text=auto eol=lf
+
+# Бинарные файлы — без конвертации
+*.docx binary
+*.png  binary
+*.jpg  binary

@@ -16,6 +16,42 @@ from pipline_folder.graph_executor import (
 )
 from pipline_folder.graph_slots import step_slots_by_node_id
 
+# ── SQL fragments aligned with BrAIniac's Prisma schema ──────────────────────
+# Tables: "User", "Project", "Pipeline", "NodeType", "Tool", "Node", "Edge"
+# All CHAR(N) name fields are TRIMmed; PKs aliased to legacy short names.
+
+_PIPELINE_COLS = """
+    p.pipeline_id        AS id,
+    TRIM(p.name)         AS name,
+    p.max_time,
+    p.max_cost,
+    p.max_reject         AS max_fail_percent,
+    p.score,
+    NULL::text           AS report,
+    TRIM(pr.name)        AS project_name
+"""
+
+_NODE_COLS = """
+    n.node_id                          AS id,
+    n.fk_pipeline_id                   AS pipeline_id,
+    n.fk_type_id                       AS type_id,
+    n.fk_sub_pipeline                  AS nested_pipeline_id,
+    n.top_k,
+    n.output_json                      AS node_config,
+    n.ui_json->>'label'                AS report,
+    TRIM(np.name)                      AS nested_pipeline_name,
+    TRIM(nt.name)                      AS type_name,
+    TRIM(nt.desc)                      AS type_description,
+    nt.config_json                     AS tool_config,
+    TRIM(t.name)                       AS tool_name
+"""
+
+_NODE_JOINS = """
+    LEFT JOIN "Pipeline"  np ON np.pipeline_id = n.fk_sub_pipeline
+    JOIN      "NodeType"  nt ON nt.type_id     = n.fk_type_id
+    JOIN      "Tool"       t ON t.tool_id      = nt.fk_tool_id
+"""
+
 
 def connections_with_step_slots(
     nodes: list[dict[str, Any]], links: list[dict[str, Any]]
@@ -54,7 +90,6 @@ class PipelineCollector:
         return await self.auth_middleware.authenticate(self.api_key)
 
     async def get_pipelines(self, project_name: str | None = None):
-        """Получить пайплайны пользователя; опционально только в проекте с точным именем."""
         user = await self._authenticate()
         pname = project_name.strip() if project_name else None
         if pname == "":
@@ -62,24 +97,24 @@ class PipelineCollector:
 
         if pname:
             return await self.db_conn.fetch(
-                """
-                SELECT p.*, pr.name as project_name
-                FROM pipelines p
-                JOIN projects pr ON pr.id = p.project_id
-                WHERE pr.user_id = $1 AND pr.name = $2
-                ORDER BY p.name
+                f"""
+                SELECT {_PIPELINE_COLS}
+                FROM "Pipeline" p
+                JOIN "Project" pr ON pr.project_id = p.fk_project_id
+                WHERE pr.fk_user_id = $1 AND TRIM(pr.name) = $2
+                ORDER BY TRIM(p.name)
                 """,
                 user["id"],
                 pname,
             )
 
         return await self.db_conn.fetch(
-            """
-            SELECT p.*, pr.name as project_name
-            FROM pipelines p
-            JOIN projects pr ON pr.id = p.project_id
-            WHERE pr.user_id = $1
-            ORDER BY pr.name, p.name
+            f"""
+            SELECT {_PIPELINE_COLS}
+            FROM "Pipeline" p
+            JOIN "Project" pr ON pr.project_id = p.fk_project_id
+            WHERE pr.fk_user_id = $1
+            ORDER BY TRIM(pr.name), TRIM(p.name)
             """,
             user["id"],
         )
@@ -88,26 +123,25 @@ class PipelineCollector:
         user = await self._authenticate()
         rows = await self.db_conn.fetch(
             """
-            SELECT pr.name
-            FROM projects pr
-            WHERE pr.user_id = $1
-            ORDER BY pr.name
+            SELECT TRIM(pr.name) AS name
+            FROM "Project" pr
+            WHERE pr.fk_user_id = $1
+            ORDER BY TRIM(pr.name)
             """,
             user["id"],
         )
         return [r["name"] for r in rows]
 
     async def find_pipelines_by_name(self, query_substring: str):
-        """Пайплайны пользователя по подстроке имени (ILIKE)."""
         user = await self._authenticate()
         pattern = f"%{query_substring.strip()}%"
         return await self.db_conn.fetch(
-            """
-            SELECT p.*, pr.name as project_name
-            FROM pipelines p
-            JOIN projects pr ON pr.id = p.project_id
-            WHERE pr.user_id = $1 AND p.name ILIKE $2
-            ORDER BY pr.name, p.name
+            f"""
+            SELECT {_PIPELINE_COLS}
+            FROM "Pipeline" p
+            JOIN "Project" pr ON pr.project_id = p.fk_project_id
+            WHERE pr.fk_user_id = $1 AND TRIM(p.name) ILIKE $2
+            ORDER BY TRIM(pr.name), TRIM(p.name)
             """,
             user["id"],
             pattern,
@@ -118,11 +152,13 @@ class PipelineCollector:
     ) -> list[int]:
         rows = await self.db_conn.fetch(
             """
-            SELECT p.id
-            FROM pipelines p
-            JOIN projects pr ON pr.id = p.project_id
-            WHERE pr.user_id = $1 AND pr.name = $2 AND p.name = $3
-            ORDER BY p.id
+            SELECT p.pipeline_id AS id
+            FROM "Pipeline" p
+            JOIN "Project" pr ON pr.project_id = p.fk_project_id
+            WHERE pr.fk_user_id = $1
+              AND TRIM(pr.name) = $2
+              AND TRIM(p.name)  = $3
+            ORDER BY p.pipeline_id
             """,
             user_id,
             project_name,
@@ -134,11 +170,11 @@ class PipelineCollector:
         self, user_id: int, pipeline_id: int
     ) -> dict[str, Any] | None:
         pipeline = await self.db_conn.fetch_one(
-            """
-            SELECT p.*, pr.name as project_name
-            FROM pipelines p
-            JOIN projects pr ON pr.id = p.project_id
-            WHERE p.id = $1 AND pr.user_id = $2
+            f"""
+            SELECT {_PIPELINE_COLS}
+            FROM "Pipeline" p
+            JOIN "Project" pr ON pr.project_id = p.fk_project_id
+            WHERE p.pipeline_id = $1 AND pr.fk_user_id = $2
             """,
             pipeline_id,
             user_id,
@@ -147,30 +183,27 @@ class PipelineCollector:
             return None
 
         nodes = await self.db_conn.fetch(
-            """
-            SELECT
-                n.*,
-                np.name AS nested_pipeline_name,
-                nt.name as type_name,
-                nt.description as type_description,
-                t.name as tool_name,
-                t.config as tool_config
-            FROM nodes n
-            LEFT JOIN pipelines np ON np.id = n.nested_pipeline_id
-            JOIN node_types nt ON nt.id = n.type_id
-            JOIN tools t ON t.id = nt.tool_id
-            WHERE n.pipeline_id = $1
-            ORDER BY n.id
+            f"""
+            SELECT {_NODE_COLS}
+            FROM "Node" n
+            {_NODE_JOINS}
+            WHERE n.fk_pipeline_id = $1
+            ORDER BY n.node_id
             """,
             pipeline_id,
         )
 
         links = await self.db_conn.fetch(
             """
-            SELECT l.*
-            FROM links l
-            JOIN nodes n ON n.id = l.from_node
-            WHERE n.pipeline_id = $1
+            SELECT
+                e.edge_id        AS id,
+                e.fk_from_node   AS from_node,
+                e.fk_to_node     AS to_node,
+                e.source_handle,
+                e.target_handle
+            FROM "Edge" e
+            JOIN "Node" n ON n.node_id = e.fk_from_node
+            WHERE n.fk_pipeline_id = $1
             """,
             pipeline_id,
         )
@@ -239,7 +272,6 @@ class PipelineCollector:
     async def load_structure_by_project_and_pipeline(
         self, project_name: str, pipeline_name: str
     ) -> dict[str, Any] | None:
-        """Одна аутентификация + загрузка графа; при дубликатах имён — ValueError."""
         user = await self._authenticate()
         pr_name = project_name.strip()
         pl_name = pipeline_name.strip()
@@ -257,7 +289,6 @@ class PipelineCollector:
         return await self._structure_for_user_pipeline(user, ids[0])
 
     async def export_structure_to_llm(self, structure: dict[str, Any]) -> dict[str, Any]:
-        """Полный экспорт: node_config, порты, nested pipelines, execution_plan."""
         user = structure.get("user") or {}
         user_id = int(user["id"])
         nodes = [normalize_node(dict(n)) for n in structure["nodes"]]

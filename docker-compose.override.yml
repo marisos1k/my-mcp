@@ -1,0 +1,4 @@
+services:
+  mcp-server:
+    ports: !override
+      - "8010:8000"

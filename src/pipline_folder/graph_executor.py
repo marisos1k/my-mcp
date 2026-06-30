@@ -116,10 +116,13 @@ def build_execution_plan(
                     "to_node_type": by_id[int(link["to_node"])].get("type_name"),
                 }
             step["branches"] = branches
+            plan.append(step)
         elif len(outs) == 1:
             step["next"] = slot[int(outs[0]["to_node"])]
+            plan.append(step)
             visit(int(outs[0]["to_node"]))
-        plan.append(step)
+        else:
+            plan.append(step)
 
     visit(start["id"])
     for n in sorted(nodes, key=lambda x: x["id"]):

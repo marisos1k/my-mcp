@@ -1,25 +1,4 @@
 services:
-  db:
-    image: postgres:18-alpine
-    container_name: pipeline-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "7474"
-      POSTGRES_DB: test_brainiac
-    ports:
-      - "5433:5432"
-    volumes:
-      # PG 18+: монтировать в /var/lib/postgresql (см. документацию образа postgres)
-      - postgres_data:/var/lib/postgresql
-      - ./test_brainiac.sql:/docker-entrypoint-initdb.d/01-test_brainiac.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d test_brainiac"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 15s
-
   mcp-server:
     build:
       context: .
@@ -29,15 +8,14 @@ services:
     env_file:
       - config.env
     environment:
-      # Переопределяют host из config.env — в сети compose БД = имя сервиса db
+      # В Docker-сети BrAIniac БД доступна по имени контейнера "db"
       host: db
       port: "5432"
       MCP_TRANSPORT: streamable-http
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8000"
-    depends_on:
-      db:
-        condition: service_healthy
+    networks:
+      - brainiac-network
     ports:
       - "8000:8000"
     healthcheck:
@@ -53,5 +31,9 @@ services:
       retries: 5
       start_period: 20s
 
-volumes:
-  postgres_data:
+networks:
+  # Внешняя сеть BrAIniac. Имя по умолчанию: <имя_папки_проекта>_brainiac-network
+  # Проверить фактическое имя: docker network ls | grep brainiac
+  brainiac-network:
+    external: true
+    name: brainiac_brainiac-network
