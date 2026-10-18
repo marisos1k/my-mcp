@@ -11,7 +11,9 @@ from db_folder.db_connection import ConnectionDB
 from mcp_app.bundled_skills import list_skill_names, load_skill_body
 from mcp_app.context import AppContext
 from mcp_app.views import public_pipeline_row, public_structure
+from pipline_folder.graph_executor import find_path
 from pipline_folder.pipeline_collector import execution_sequence_walk
+from pipline_folder.port_schema import loop_limit_status
 
 
 async def _require_pipeline(
@@ -391,7 +393,9 @@ def register_tools(mcp: FastMCP) -> None:
         description=(
             "Соединить два узла рёбром. from_slot / to_slot — step_slot из create_node "
             "или get_pipeline_structure. "
-            "from_port: 'out' (default), 'yes', 'no', 'error'. to_port: 'in' (default)."
+            "from_port: 'out' (default), 'yes', 'no', 'error'. to_port: 'in' (default). "
+            "Ребро, замыкающее цикл, принимается только если хотя бы один узел цикла "
+            "несёт loop.maxIterations >= 1 в NodeType.config_json (loop policy BrAIniac)."
         )
     )
     async def connect_nodes(
@@ -419,18 +423,55 @@ def register_tools(mcp: FastMCP) -> None:
         if to_slot < 1 or to_slot > n:
             raise ValueError(f"to_slot {to_slot} out of range 1..{n}")
 
+        if from_slot == to_slot:
+            raise ValueError(f"Нельзя соединить слот {from_slot} сам с собой")
+
         from_node_id = rows[from_slot - 1]["node_id"]
         to_node_id = rows[to_slot - 1]["node_id"]
+
+        # Цикл допустим, только если он guarded loop-политикой — правило
+        # validateCyclePolicy из BrAIniac edge.application.service.ts.
+        edges = await app.db.fetch(
+            'SELECT e.fk_from_node AS from_node, e.fk_to_node AS to_node FROM "Edge" e '
+            'JOIN "Node" n ON n.node_id = e.fk_from_node WHERE n.fk_pipeline_id = $1',
+            pipeline_id,
+        )
+        cycle_ids = find_path([dict(e) for e in edges], to_node_id, from_node_id)
+        if cycle_ids:
+            configs = await app.db.fetch(
+                'SELECT nt.config_json FROM "Node" n '
+                'JOIN "NodeType" nt ON nt.type_id = n.fk_type_id '
+                'WHERE n.node_id = ANY($1::int[])',
+                cycle_ids,
+            )
+            statuses = [loop_limit_status(c["config_json"]) for c in configs]
+            if "valid" not in statuses:
+                in_cycle = set(cycle_ids)
+                cycle_slots = ", ".join(
+                    str(i + 1) for i, r in enumerate(rows) if r["node_id"] in in_cycle
+                )
+                if "invalid" in statuses:
+                    raise ValueError(
+                        f"Цикл по слотам {cycle_slots} требует "
+                        "loop.maxIterations >= 1 в NodeType.config_json"
+                    )
+                raise ValueError(
+                    f"Цикл по слотам {cycle_slots} требует loop policy: "
+                    "loop.maxIterations >= 1 в NodeType.config_json хотя бы у одного узла цикла"
+                )
 
         await app.db.fetch_one(
             'INSERT INTO "Edge" (fk_from_node, fk_to_node, source_handle, target_handle) '
             'VALUES ($1, $2, $3, $4) RETURNING edge_id',
             from_node_id, to_node_id, from_port, to_port,
         )
-        return {
+        result: dict[str, Any] = {
             "connected": True,
             "from_slot": from_slot,
             "to_slot": to_slot,
             "from_port": from_port,
             "to_port": to_port,
         }
+        if cycle_ids:
+            result["cycle"] = True
+        return result

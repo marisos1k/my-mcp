@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Awaitable, Callable
 
 from pipline_folder.graph_slots import step_slots_by_node_id
@@ -32,7 +33,7 @@ def connections_with_ports(
 def execution_sequence_walk(
     nodes: list[dict[str, Any]], links: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Порядок обхода от стартового узла по рёбрам."""
+    """Порядок обхода от стартового узла по рёбрам"""
     if not nodes:
         return []
     slot = step_slots_by_node_id(nodes)
@@ -43,8 +44,10 @@ def execution_sequence_walk(
         start_node = sorted(nodes, key=lambda n: n["id"])[0]
 
     out: list[dict[str, Any]] = []
+    visited: set[int] = set()
     current_id: int | None = start_node["id"]
-    while current_id is not None:
+    while current_id is not None and current_id not in visited:
+        visited.add(current_id)
         node = nodes_dict[current_id]
         schema = resolve_port_schema(node.get("tool_config"), node.get("type_name"))
         out.append(
@@ -129,6 +132,36 @@ def build_execution_plan(
         if n["id"] not in visited:
             visit(n["id"])
     return plan
+
+
+def find_path(
+    links: list[dict[str, Any]], src: int, dst: int
+) -> list[int] | None:
+    """BFS-путь src → dst включительно; None если пути нет.
+
+    Устойчив к уже существующим в графе циклам (visited).
+    Зеркало findPath из BrAIniac edge.application.service.ts.
+    """
+    adjacency: dict[int, list[int]] = {}
+    for link in links:
+        adjacency.setdefault(int(link["from_node"]), []).append(int(link["to_node"]))
+
+    parent: dict[int, int] = {}
+    visited = {src}
+    queue = deque([src])
+    while queue:
+        current = queue.popleft()
+        if current == dst:
+            path = [current]
+            while path[-1] != src:
+                path.append(parent[path[-1]])
+            return list(reversed(path))
+        for nxt in adjacency.get(current, ()):
+            if nxt not in visited:
+                visited.add(nxt)
+                parent[nxt] = current
+                queue.append(nxt)
+    return None
 
 
 async def execute_plan(
